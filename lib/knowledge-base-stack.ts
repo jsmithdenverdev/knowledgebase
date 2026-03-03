@@ -8,6 +8,7 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as s3_notifications from 'aws-cdk-lib/aws-s3-notifications';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as bedrock from 'aws-cdk-lib/aws-bedrock';
+import * as s3Vectors from 'cdk-s3-vectors';
 
 export interface KnowledgeBaseStackProps extends cdk.StackProps {
   env?: cdk.Environment;
@@ -52,7 +53,9 @@ export class KnowledgeBaseStack extends cdk.Stack {
           'bedrock:InvokeModelWithResponseStream',
           'bedrock:Retrieve',
           'bedrock:RetrieveAndGenerate',
-          'bedrock:IngestKnowledgeBaseDocuments',
+          'bedrock:StartIngestionJob',
+          'bedrock:GetIngestionJob',
+          'bedrock:ListDataSources',
         ],
         resources: ['*'],
       })
@@ -71,66 +74,112 @@ export class KnowledgeBaseStack extends cdk.Stack {
     knowledgeBaseBucket.grantRead(lambdaRole);
     knowledgeBaseBucket.grantWrite(lambdaRole);
 
-    const knowledgeBase = new bedrock.CfnKnowledgeBase(this, 'KnowledgeBase', {
-      name: 'KnowledgeBase',
-      roleArn: lambdaRole.roleArn,
+    const vectorBucketName = cdk.Fn.join('-', [
+      'knowledge-base-vectors',
+      cdk.Aws.ACCOUNT_ID,
+      cdk.Aws.REGION,
+    ]);
+
+    const vectorBucket = new s3Vectors.Bucket(this, 'VectorBucket', {
+      vectorBucketName,
+    });
+
+    const vectorIndex = new s3Vectors.Index(this, 'VectorIndex', {
+      vectorBucketName: vectorBucket.vectorBucketName,
+      indexName: 'documents-index',
+      dataType: 'float32',
+      dimension: 1024,
+      distanceMetric: 'cosine',
+      metadataConfiguration: {
+        nonFilterableMetadataKeys: [
+          'AMAZON_BEDROCK_TEXT',
+          'AMAZON_BEDROCK_METADATA',
+          'x-amz-bedrock-kb-parent-text',
+          'x-amz-bedrock-kb-metadata-json',
+        ],
+      },
+    });
+    vectorIndex.node.addDependency(vectorBucket);
+
+    const knowledgeBase = new s3Vectors.KnowledgeBase(this, 'KnowledgeBase', {
+      knowledgeBaseName: cdk.Fn.join('-', ['knowledge-base', cdk.Aws.ACCOUNT_ID, cdk.Aws.REGION]),
+      vectorBucketArn: vectorBucket.vectorBucketArn,
+      indexArn: vectorIndex.indexArn,
       description: 'Knowledge base for RAG application',
       knowledgeBaseConfiguration: {
-        type: 'VECTOR',
-        vectorKnowledgeBaseConfiguration: {
-          embeddingModelArn: `arn:aws:bedrock:${this.region}::foundation-model/amazon.titan-embed-text-v2:0`,
-          vectorDatabaseConfiguration: {
-            type: 'OPENSEARCH_SERVERLESS',
-            opensearchServerlessConfiguration: {
-              fieldMappings: {
-                vectorField: 'vector_field',
-                textField: 'text_field',
-                metadataField: 'metadata_field',
-              },
-            },
-          },
+        embeddingModelArn: `arn:aws:bedrock:${this.region}::foundation-model/amazon.titan-embed-text-v2:0`,
+        embeddingDataType: 'FLOAT32',
+        dimensions: '1024',
+      },
+    });
+    knowledgeBase.node.addDependency(vectorIndex);
+    knowledgeBase.node.addDependency(vectorBucket);
+
+    knowledgeBaseBucket.grantRead(knowledgeBase.role);
+    knowledgeBase.grantIngestion(lambdaRole);
+
+    const dataSourceName = 'documents-data-source';
+
+    const dataSource = new bedrock.CfnDataSource(this, 'DocumentsDataSource', {
+      name: dataSourceName,
+      knowledgeBaseId: knowledgeBase.knowledgeBaseId,
+      dataSourceConfiguration: {
+        type: 'S3',
+        s3Configuration: {
+          bucketArn: knowledgeBaseBucket.bucketArn,
         },
       },
     });
 
-    const commonLambdaProps = {
+    const connectLambda = new NodejsFunction(this, 'ConnectLambda', {
       role: lambdaRole,
+      entry: 'src/handlers/connect.ts',
       environment: {
         CONNECTIONS_TABLE: connectionTable.tableName,
         PARAMETERS_TABLE: parametersTable.tableName,
-        KNOWLEDGE_BASE_BUCKET: knowledgeBaseBucket.bucketName,
-        KNOWLEDGE_BASE_ID: knowledgeBase.ref,
+        KNOWLEDGE_BASE_ID: knowledgeBase.knowledgeBaseId,
       },
-    };
-
-    const connectLambda = new NodejsFunction(this, 'ConnectLambda', {
-      ...commonLambdaProps,
-      entry: 'src/handlers/connect.ts',
     });
 
     const ingestLambda = new NodejsFunction(this, 'IngestLambda', {
-      ...commonLambdaProps,
+      role: lambdaRole,
       entry: 'src/handlers/ingest.ts',
       timeout: cdk.Duration.minutes(5),
       memorySize: 1024,
+      environment: {
+        CONNECTIONS_TABLE: connectionTable.tableName,
+        PARAMETERS_TABLE: parametersTable.tableName,
+        KNOWLEDGE_BASE_ID: knowledgeBase.knowledgeBaseId,
+        DATA_SOURCE_NAME: dataSourceName,
+      },
     });
 
     const defaultLambda = new NodejsFunction(this, 'DefaultLambda', {
-      ...commonLambdaProps,
+      role: lambdaRole,
       entry: 'src/handlers/default.ts',
       timeout: cdk.Duration.seconds(30),
       memorySize: 512,
+      environment: {
+        CONNECTIONS_TABLE: connectionTable.tableName,
+        PARAMETERS_TABLE: parametersTable.tableName,
+        KNOWLEDGE_BASE_ID: knowledgeBase.knowledgeBaseId,
+      },
     });
 
     const disconnectLambda = new NodejsFunction(this, 'DisconnectLambda', {
-      ...commonLambdaProps,
+      role: lambdaRole,
       entry: 'src/handlers/disconnect.ts',
+      environment: {
+        CONNECTIONS_TABLE: connectionTable.tableName,
+        PARAMETERS_TABLE: parametersTable.tableName,
+        KNOWLEDGE_BASE_ID: knowledgeBase.knowledgeBaseId,
+      },
     });
 
     knowledgeBaseBucket.addEventNotification(
       s3.EventType.OBJECT_CREATED,
       new s3_notifications.LambdaDestination(ingestLambda),
-      { filters: [{ prefix: 'documents/' }] }
+      { prefix: 'documents/' }
     );
 
     const webSocketApi = new apigatewayv2.WebSocketApi(this, 'WebSocketApi', {
