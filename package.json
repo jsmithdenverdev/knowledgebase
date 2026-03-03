@@ -44,6 +44,7 @@
   "dependencies": {
     "@aws-lambda-powertools/logger": "^2.1.1",
     "@aws-sdk/client-apigatewaymanagementapi": "^3.490.0",
+    "@aws-sdk/client-bedrock": "^3.490.0",
     "@aws-sdk/client-bedrock-runtime": "^3.490.0",
     "@aws-sdk/client-dynamodb": "^3.490.0",
     "@aws-sdk/client-s3": "^3.490.0",

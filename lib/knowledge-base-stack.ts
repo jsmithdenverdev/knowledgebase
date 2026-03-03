@@ -5,7 +5,9 @@ import * as apigatewayv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import * as apigatewayv2_integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as s3_notifications from 'aws-cdk-lib/aws-s3-notifications';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as bedrock from 'aws-cdk-lib/aws-bedrock';
 
 export interface KnowledgeBaseStackProps extends cdk.StackProps {
   env?: cdk.Environment;
@@ -45,7 +47,13 @@ export class KnowledgeBaseStack extends cdk.Stack {
     lambdaRole.addToPolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
+        actions: [
+          'bedrock:InvokeModel',
+          'bedrock:InvokeModelWithResponseStream',
+          'bedrock:Retrieve',
+          'bedrock:RetrieveAndGenerate',
+          'bedrock:IngestKnowledgeBaseDocuments',
+        ],
         resources: ['*'],
       })
     );
@@ -61,6 +69,29 @@ export class KnowledgeBaseStack extends cdk.Stack {
     connectionTable.grantReadWriteData(lambdaRole);
     parametersTable.grantReadWriteData(lambdaRole);
     knowledgeBaseBucket.grantRead(lambdaRole);
+    knowledgeBaseBucket.grantWrite(lambdaRole);
+
+    const knowledgeBase = new bedrock.CfnKnowledgeBase(this, 'KnowledgeBase', {
+      name: 'KnowledgeBase',
+      roleArn: lambdaRole.roleArn,
+      description: 'Knowledge base for RAG application',
+      knowledgeBaseConfiguration: {
+        type: 'VECTOR',
+        vectorKnowledgeBaseConfiguration: {
+          embeddingModelArn: `arn:aws:bedrock:${this.region}::foundation-model/amazon.titan-embed-text-v2:0`,
+          vectorDatabaseConfiguration: {
+            type: 'OPENSEARCH_SERVERLESS',
+            opensearchServerlessConfiguration: {
+              fieldMappings: {
+                vectorField: 'vector_field',
+                textField: 'text_field',
+                metadataField: 'metadata_field',
+              },
+            },
+          },
+        },
+      },
+    });
 
     const commonLambdaProps = {
       role: lambdaRole,
@@ -68,12 +99,20 @@ export class KnowledgeBaseStack extends cdk.Stack {
         CONNECTIONS_TABLE: connectionTable.tableName,
         PARAMETERS_TABLE: parametersTable.tableName,
         KNOWLEDGE_BASE_BUCKET: knowledgeBaseBucket.bucketName,
+        KNOWLEDGE_BASE_ID: knowledgeBase.ref,
       },
     };
 
     const connectLambda = new NodejsFunction(this, 'ConnectLambda', {
       ...commonLambdaProps,
       entry: 'src/handlers/connect.ts',
+    });
+
+    const ingestLambda = new NodejsFunction(this, 'IngestLambda', {
+      ...commonLambdaProps,
+      entry: 'src/handlers/ingest.ts',
+      timeout: cdk.Duration.minutes(5),
+      memorySize: 1024,
     });
 
     const defaultLambda = new NodejsFunction(this, 'DefaultLambda', {
@@ -87,6 +126,12 @@ export class KnowledgeBaseStack extends cdk.Stack {
       ...commonLambdaProps,
       entry: 'src/handlers/disconnect.ts',
     });
+
+    knowledgeBaseBucket.addEventNotification(
+      s3.EventType.OBJECT_CREATED,
+      new s3_notifications.LambdaDestination(ingestLambda),
+      { filters: [{ prefix: 'documents/' }] }
+    );
 
     const webSocketApi = new apigatewayv2.WebSocketApi(this, 'WebSocketApi', {
       apiName: 'KnowledgeBaseWebSocket',
