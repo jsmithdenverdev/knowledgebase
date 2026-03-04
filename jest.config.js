@@ -6,12 +6,8 @@ module.exports = {
   transform: {
     '^.+\\.ts$': 'ts-jest',
   },
-  collectCoverageFrom: [
-    'src/**/*.ts',
-    '!src/**/*.test.ts',
-    '!src/**/*.spec.ts',
-    '!src/models/**',
-  ],
+  transformIgnorePatterns: ['node_modules/(?!uuid)'],
+  collectCoverageFrom: ['src/**/*.ts', '!src/**/*.test.ts', '!src/**/*.spec.ts', '!src/models/**'],
   coverageThreshold: {
     global: {
       branches: 80,

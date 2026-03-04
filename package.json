@@ -43,13 +43,9 @@
   },
   "dependencies": {
     "@aws-lambda-powertools/logger": "^2.1.1",
-    "@aws-sdk/client-apigatewaymanagementapi": "^3.490.0",
-    "@aws-sdk/client-bedrock": "^3.490.0",
     "@aws-sdk/client-bedrock-agent": "^3.1000.0",
     "@aws-sdk/client-bedrock-runtime": "^3.490.0",
-    "@aws-sdk/client-dynamodb": "^3.490.0",
     "@aws-sdk/client-s3": "^3.490.0",
-    "@aws-sdk/lib-dynamodb": "^3.490.0",
     "@middy/core": "^4.7.0",
     "@middy/error-logger": "^4.7.0",
     "@middy/http-error-handler": "^4.7.0",
