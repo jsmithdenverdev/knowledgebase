@@ -1,12 +1,14 @@
 import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as s3_notifications from 'aws-cdk-lib/aws-s3-notifications';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as bedrock from 'aws-cdk-lib/aws-bedrock';
 import * as s3Vectors from 'cdk-s3-vectors';
+import { sharedNodeBundling } from './nodejs-bundling';
 
 export interface KnowledgeBaseStackProps extends cdk.StackProps {
   env?: cdk.Environment;
@@ -15,6 +17,8 @@ export interface KnowledgeBaseStackProps extends cdk.StackProps {
 export class KnowledgeBaseStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: KnowledgeBaseStackProps) {
     super(scope, id, props);
+
+    const nodeRuntime = lambda.Runtime.NODEJS_24_X;
 
     const knowledgeBaseBucket = new s3.Bucket(this, 'KnowledgeBaseBucket', {
       bucketName: `knowledge-base-docs-${this.account}-${this.region}`,
@@ -107,6 +111,8 @@ export class KnowledgeBaseStack extends cdk.Stack {
 
     const ingestLambda = new NodejsFunction(this, 'IngestLambda', {
       role: lambdaRole,
+      runtime: nodeRuntime,
+      bundling: sharedNodeBundling,
       entry: 'src/handlers/ingest.ts',
       timeout: cdk.Duration.minutes(5),
       memorySize: 1024,
@@ -118,6 +124,8 @@ export class KnowledgeBaseStack extends cdk.Stack {
 
     const chatLambda = new NodejsFunction(this, 'ChatLambda', {
       role: lambdaRole,
+      runtime: nodeRuntime,
+      bundling: sharedNodeBundling,
       entry: 'src/handlers/chat.ts',
       timeout: cdk.Duration.minutes(5),
       memorySize: 1024,
