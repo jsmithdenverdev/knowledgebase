@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "lib/handlers",
+    "rootDir": "src/handlers",
+    "declaration": false
+  },
+  "include": ["src/handlers/**/*.ts"],
+  "exclude": ["**/*.test.ts"]
+}

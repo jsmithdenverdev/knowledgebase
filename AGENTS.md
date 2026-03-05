@@ -24,21 +24,25 @@ Precommit hooks (Husky) automatically run tests, lint, and format before allowin
 ## Code Style Guidelines
 
 ### TypeScript & Types
+
 - Enable strict mode, type all function parameters and return values
 - Use interfaces for object shapes, types for unions/primitives
 - AWS SDK v3: `import { ClientType } from '@aws-sdk/client-*'`
 - CDK: `import * as cdk from 'aws-cdk-lib'`
 
 ### Imports
+
 - Order: external libraries → internal modules → relative imports
 - AWS SDK: import specific clients only, never entire package
 - Example: `import { DynamoDBClient } from '@aws-sdk/client-dynamodb'`
 
 ### Formatting
+
 - Let Prettier handle formatting (indents, quotes, etc.)
 - Don't debate quote style - Prettier enforces consistency
 
 ### Naming Conventions
+
 - Files: `kebab-case.ts`
 - Classes: `PascalCase`
 - Functions/methods: `camelCase`
@@ -46,22 +50,26 @@ Precommit hooks (Husky) automatically run tests, lint, and format before allowin
 - AWS resources: `kebab-case` with environment prefix (e.g., `prod-chat-connection-table`)
 
 ### Error Handling
+
 - Use Middy.js middleware for all Lambda handlers
 - Custom error classes with status codes
 - Middy's error handler for consistent JSON responses
 
 ### AWS SDK v3 Patterns
+
 - Import specific clients, use `client.send()` with async/await
 - Explicit types for all responses
 - Dispose clients after use in Lambda handlers
 
 ### Lambda Patterns
+
 - Use `Handler` type from `@types/aws-lambda`
 - Middy middleware pipeline: logger → error handler → JSON body parser → CORS
 - Extract business logic into separate testable functions
 - Lambda Powertools Logger: structured logs, correlation IDs for tracing
 
 ### CDK Patterns
+
 - Single stack for this POC
 - Use CDK constructs, not raw CloudFormation
 - Extract reusable logic into helper functions
@@ -69,6 +77,7 @@ Precommit hooks (Husky) automatically run tests, lint, and format before allowin
 - Follow best practices: least privilege, consistent naming, tagging
 
 ### WebSockets for Streaming
+
 - Use API Gateway WebSocket API for conversation streaming
 - Lambda @connect/@disconnect/@default routes
 - Connection management via DynamoDB
