@@ -16,7 +16,7 @@ type ChatRequestBody = {
   temperature?: number;
 };
 
-const MODEL_ID = 'anthropic.claude-3-haiku-20240307-v1:0';
+const DEFAULT_MODEL_ID = 'anthropic.claude-3-haiku-20240307-v1:0';
 
 export const chatStreamHandler = async (
   event: APIGatewayProxyEvent,
@@ -50,6 +50,11 @@ export const chatStreamHandler = async (
     return;
   }
 
+  const modelId = process.env.CHAT_MODEL_ID?.trim() || DEFAULT_MODEL_ID;
+  if (!process.env.CHAT_MODEL_ID) {
+    log.debug('CHAT_MODEL_ID not set; using default model', { modelId });
+  }
+
   const httpStream = awslambda.HttpResponseStream.from(responseStream, {
     statusCode: 200,
     headers: {
@@ -61,7 +66,7 @@ export const chatStreamHandler = async (
 
   try {
     const command = new InvokeModelWithResponseStreamCommand({
-      modelId: MODEL_ID,
+      modelId,
       contentType: 'application/json',
       accept: 'application/json',
       body: JSON.stringify({

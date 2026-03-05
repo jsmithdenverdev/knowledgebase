@@ -1,6 +1,6 @@
 import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs';
-import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
+import { BundlingOptions, NodejsFunction, OutputFormat } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as s3 from 'aws-cdk-lib/aws-s3';
@@ -8,7 +8,6 @@ import * as s3_notifications from 'aws-cdk-lib/aws-s3-notifications';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as bedrock from 'aws-cdk-lib/aws-bedrock';
 import * as s3Vectors from 'cdk-s3-vectors';
-import { sharedNodeBundling } from './nodejs-bundling';
 
 export interface KnowledgeBaseStackProps extends cdk.StackProps {
   env?: cdk.Environment;
@@ -19,6 +18,31 @@ export class KnowledgeBaseStack extends cdk.Stack {
     super(scope, id, props);
 
     const nodeRuntime = lambda.Runtime.NODEJS_24_X;
+    const sharedNodeBundling: BundlingOptions = {
+      minify: true,
+      sourceMap: false,
+      sourcesContent: false,
+      format: OutputFormat.CJS,
+      target: 'node24',
+      externalModules: ['@aws-sdk/*', 'aws-lambda'],
+    };
+    const defaultChatModelId = 'anthropic.claude-3-haiku-20240307-v1:0';
+    const chatModelIdParam = new cdk.CfnParameter(this, 'ChatModelId', {
+      type: 'String',
+      default: '',
+      description:
+        'Bedrock model identifier used for chat streaming (e.g., anthropic.claude-3-haiku-20240307-v1:0). Leave blank to use the default.',
+    });
+    const hasChatModelId = new cdk.CfnCondition(this, 'HasChatModelId', {
+      expression: cdk.Fn.conditionNot(cdk.Fn.conditionEquals(chatModelIdParam.valueAsString, '')),
+    });
+    const resolvedChatModelId = cdk.Token.asString(
+      cdk.Fn.conditionIf(
+        hasChatModelId.logicalId,
+        chatModelIdParam.valueAsString,
+        defaultChatModelId
+      )
+    );
 
     const knowledgeBaseBucket = new s3.Bucket(this, 'KnowledgeBaseBucket', {
       bucketName: `knowledge-base-docs-${this.account}-${this.region}`,
@@ -131,6 +155,7 @@ export class KnowledgeBaseStack extends cdk.Stack {
       memorySize: 1024,
       environment: {
         KNOWLEDGE_BASE_ID: knowledgeBase.knowledgeBaseId,
+        CHAT_MODEL_ID: resolvedChatModelId,
       },
     });
 
