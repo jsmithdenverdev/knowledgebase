@@ -1,8 +1,8 @@
 import { randomUUID } from 'crypto';
 import {
-  BedrockRuntimeClient,
-  InvokeModelWithResponseStreamCommand,
-} from '@aws-sdk/client-bedrock-runtime';
+  BedrockAgentRuntimeClient,
+  InvokeAgentCommand,
+} from '@aws-sdk/client-bedrock-agent-runtime';
 import { Logger } from '@aws-lambda-powertools/logger';
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 import { ZodError } from 'zod';
@@ -11,29 +11,10 @@ import { normalizeMessages, openAiErrorPayload, parseChatRequest } from '../mode
 import type { NormalizedChatMessage } from '../models/openai-chat';
 
 const log = new Logger({ serviceName: 'chat-handler' });
-const bedrockRuntime = new BedrockRuntimeClient({});
+const bedrockAgentRuntime = new BedrockAgentRuntimeClient({});
 const textDecoder = new TextDecoder();
 
-const DEFAULT_MODEL_ID = 'anthropic.claude-3-haiku-20240307-v1:0';
-const DEFAULT_MAX_TOKENS = 1024;
-const DEFAULT_TEMPERATURE = 0.3;
-const DEFAULT_TOP_P = 0.95;
-
-let systemPromptWarningEmitted = false;
-const getSystemPrompt = (): string | undefined => {
-  const prompt = process.env.CHAT_SYSTEM_PROMPT?.trim();
-  if (!prompt && !systemPromptWarningEmitted) {
-    log.warn('CHAT_SYSTEM_PROMPT not set; proceeding without system instructions.');
-    systemPromptWarningEmitted = true;
-  }
-  return prompt;
-};
-
-type ClaudeMessage = {
-  role: 'user' | 'assistant';
-  content: Array<{ type: 'text'; text: string }>;
-};
-
+type ConversationMessage = NormalizedChatMessage & { role: 'user' | 'assistant' };
 type FinishReason = 'stop' | 'length' | 'content_filter' | 'tool_calls';
 
 const createMetadataResponse = (
@@ -49,104 +30,48 @@ const createMetadataResponse = (
     httpStream.end();
   };
 
-const extractTextDelta = (payload: Record<string, unknown>): string | null => {
-  const textValue = payload.text;
-  if (typeof textValue === 'string') {
-    return textValue;
-  }
-
-  const deltaCandidate = payload.delta;
-  if (typeof deltaCandidate === 'object' && deltaCandidate !== null) {
-    const delta = deltaCandidate as Record<string, unknown>;
-    const deltaText = delta.text;
-    if (typeof deltaText === 'string') {
-      return deltaText;
-    }
-
-    if (delta.type === 'text_delta' && typeof delta.text === 'string') {
-      return delta.text;
-    }
-  }
-
-  const completionValue = payload.completion;
-  if (typeof completionValue === 'string') {
-    return completionValue;
-  }
-
-  const outputText = payload.output_text;
-  if (Array.isArray(outputText)) {
-    return outputText.filter((part) => typeof part === 'string').join('');
-  }
-
-  const messageCandidate = payload.message;
-  if (
-    messageCandidate &&
-    typeof messageCandidate === 'object' &&
-    'content' in messageCandidate &&
-    Array.isArray((messageCandidate as { content?: unknown[] }).content)
-  ) {
-    const combined = (messageCandidate as { content: Array<{ text?: unknown }> }).content
-      .map((entry) => (typeof entry.text === 'string' ? entry.text : ''))
-      .join('');
-    return combined || null;
-  }
-
-  return null;
-};
-
-const extractStopReason = (payload: Record<string, unknown>): string | null => {
-  const deltaCandidate = payload.delta;
-  if (
-    deltaCandidate &&
-    typeof deltaCandidate === 'object' &&
-    typeof (deltaCandidate as Record<string, unknown>).stop_reason === 'string'
-  ) {
-    return (deltaCandidate as Record<string, unknown>).stop_reason as string;
-  }
-  const stopReason = payload.stop_reason;
-  if (typeof stopReason === 'string') {
-    return stopReason;
-  }
-  const completionReason = payload.completion_reason;
-  if (typeof completionReason === 'string') {
-    return completionReason;
-  }
-  return null;
-};
-
-const mapFinishReason = (reason: string | null): FinishReason | null => {
-  switch (reason) {
-    case 'end_turn':
-    case 'stop_sequence':
-    case 'user':
-      return 'stop';
-    case 'max_tokens':
-      return 'length';
-    case 'content_filter':
-      return 'content_filter';
-    case 'tool_use':
-      return 'tool_calls';
-    default:
-      return null;
-  }
-};
-
 const sendStreamError = (httpStream: awslambda.HttpResponseStream, message: string) => {
   httpStream.write('event: error\n');
   httpStream.write(`data: ${JSON.stringify(openAiErrorPayload(message, 'server_error'))}\n\n`);
   httpStream.end();
 };
 
-const streamBedrockResponse = async (
-  body: AsyncIterable<any>,
+const getAgentConfiguration = () => {
+  const agentId = process.env.AGENT_ID?.trim();
+  const agentAliasId = (process.env.AGENT_ALIAS_ID ?? 'TSTALIASID').trim();
+  if (!agentId || !agentAliasId) {
+    return null;
+  }
+  return { agentId, agentAliasId };
+};
+
+const buildAgentInputText = (conversation: ConversationMessage[]): string => {
+  const latestMessage = conversation.at(-1);
+  if (!latestMessage) {
+    return '';
+  }
+
+  if (conversation.length === 1) {
+    return latestMessage.content;
+  }
+
+  const history = conversation
+    .slice(0, -1)
+    .map((message) => `${message.role === 'user' ? 'User' : 'Assistant'}: ${message.content}`)
+    .join('\n');
+
+  return `${history}\nUser: ${latestMessage.content}`;
+};
+
+const streamAgentResponse = async (
+  completion: AsyncIterable<any>,
   httpStream: awslambda.HttpResponseStream,
-  modelId: string
+  agentId: string
 ) => {
   const completionId = `chatcmpl-${randomUUID()}`;
   const created = Math.floor(Date.now() / 1000);
-  const systemFingerprint = `bedrock:${modelId}`;
+  const systemFingerprint = `bedrock-agent:${agentId}`;
   let assistantRoleSent = false;
-  let finishChunkSent = false;
 
   const writeChunk = (contentText?: string, finishReason?: FinishReason | null) => {
     if (!contentText && finishReason === undefined) {
@@ -166,7 +91,7 @@ const streamBedrockResponse = async (
       id: completionId,
       object: 'chat.completion.chunk',
       created,
-      model: modelId,
+      model: agentId,
       system_fingerprint: systemFingerprint,
       choices: [
         {
@@ -180,44 +105,62 @@ const streamBedrockResponse = async (
     httpStream.write(`data: ${JSON.stringify(payload)}\n\n`);
   };
 
-  for await (const eventPayload of body) {
-    if (eventPayload.chunk?.bytes) {
-      const decoded = textDecoder.decode(eventPayload.chunk.bytes);
-      try {
-        const parsed = JSON.parse(decoded) as Record<string, unknown>;
-        const text = extractTextDelta(parsed);
-        if (text) {
-          writeChunk(text);
-        }
+  const handleErrorEvent = (event: Record<string, { message?: string }>, fallback: string) => {
+    const entry = Object.values(event)[0];
+    throw new Error(entry?.message ?? fallback);
+  };
 
-        const stopReason = extractStopReason(parsed);
-        const finishReason = mapFinishReason(stopReason);
-        if (finishReason && !finishChunkSent) {
-          writeChunk(undefined, finishReason);
-          finishChunkSent = true;
-        }
-      } catch (error) {
-        log.warn('Failed to parse Bedrock chunk', {
-          error: error instanceof Error ? error.message : 'unknown',
-        });
+  for await (const event of completion) {
+    if (event.chunk?.bytes) {
+      const text = textDecoder.decode(event.chunk.bytes);
+      if (text) {
+        writeChunk(text);
       }
+      continue;
     }
 
-    if (eventPayload.internalServerException) {
-      throw new Error(eventPayload.internalServerException.message || 'Internal Bedrock error');
+    if (event.trace || event.returnControl || event.files) {
+      log.debug('Received agent trace event', {
+        hasTrace: Boolean(event.trace),
+        hasReturnControl: Boolean(event.returnControl),
+        hasFiles: Boolean(event.files),
+      });
+      continue;
     }
-    if (eventPayload.throttlingException) {
-      throw new Error(eventPayload.throttlingException.message || 'Bedrock throttling error');
+
+    if (event.internalServerException) {
+      handleErrorEvent(event, 'Agent internal error');
     }
-    if (eventPayload.validationException) {
-      throw new Error(eventPayload.validationException.message || 'Bedrock validation error');
+    if (event.validationException) {
+      handleErrorEvent(event, 'Agent validation error');
+    }
+    if (event.resourceNotFoundException) {
+      handleErrorEvent(event, 'Agent or alias not found');
+    }
+    if (event.serviceQuotaExceededException) {
+      handleErrorEvent(event, 'Agent quota exceeded');
+    }
+    if (event.throttlingException) {
+      handleErrorEvent(event, 'Agent throttled your request');
+    }
+    if (event.accessDeniedException) {
+      handleErrorEvent(event, 'Access denied while invoking agent');
+    }
+    if (event.conflictException) {
+      handleErrorEvent(event, 'Agent conflict error');
+    }
+    if (event.dependencyFailedException) {
+      handleErrorEvent(event, 'Agent dependency failure');
+    }
+    if (event.badGatewayException) {
+      handleErrorEvent(event, 'Agent gateway failure');
+    }
+    if (event.modelNotReadyException) {
+      handleErrorEvent(event, 'Agent model not ready');
     }
   }
 
-  if (!finishChunkSent) {
-    writeChunk(undefined, 'stop');
-  }
-
+  writeChunk(undefined, 'stop');
   httpStream.write('data: [DONE]\n\n');
   httpStream.end();
 };
@@ -227,6 +170,12 @@ export const chatStreamHandler = async (
   responseStream: awslambda.HttpResponseStream
 ) => {
   const metadataResponse = createMetadataResponse(responseStream);
+
+  const agentConfiguration = getAgentConfiguration();
+  if (!agentConfiguration) {
+    metadataResponse(500, openAiErrorPayload('Agent configuration missing.', 'server_error'));
+    return;
+  }
 
   if (!event.body) {
     metadataResponse(400, openAiErrorPayload('Request body is required.', 'invalid_request_error'));
@@ -274,7 +223,6 @@ export const chatStreamHandler = async (
     return;
   }
 
-  type ConversationMessage = NormalizedChatMessage & { role: 'user' | 'assistant' };
   const conversation = normalizedMessages.filter(
     (message): message is ConversationMessage =>
       message.role === 'user' || message.role === 'assistant'
@@ -299,14 +247,13 @@ export const chatStreamHandler = async (
     return;
   }
 
-  const messagesForClaude: ClaudeMessage[] = conversation.map((message) => ({
-    role: message.role,
-    content: [{ type: 'text', text: message.content }],
-  }));
-
-  const modelId = process.env.CHAT_MODEL_ID?.trim() || DEFAULT_MODEL_ID;
-  if (!process.env.CHAT_MODEL_ID) {
-    log.debug('CHAT_MODEL_ID not set; using default model', { modelId });
+  const inputText = buildAgentInputText(conversation);
+  if (!inputText) {
+    metadataResponse(
+      400,
+      openAiErrorPayload('messages must contain non-empty content.', 'invalid_request_error')
+    );
+    return;
   }
 
   const httpStream = awslambda.HttpResponseStream.from(responseStream, {
@@ -319,28 +266,21 @@ export const chatStreamHandler = async (
   });
 
   try {
-    const systemPrompt = getSystemPrompt();
-    const command = new InvokeModelWithResponseStreamCommand({
-      modelId,
-      contentType: 'application/json',
-      accept: 'application/json',
-      body: JSON.stringify({
-        anthropic_version: 'bedrock-2023-05-31',
-        messages: messagesForClaude,
-        max_tokens: DEFAULT_MAX_TOKENS,
-        temperature: DEFAULT_TEMPERATURE,
-        top_p: DEFAULT_TOP_P,
-        ...(systemPrompt ? { system: systemPrompt } : {}),
-      }),
+    const sessionId = randomUUID();
+    const command = new InvokeAgentCommand({
+      agentId: agentConfiguration.agentId,
+      agentAliasId: agentConfiguration.agentAliasId,
+      sessionId,
+      inputText,
     });
 
-    const bedrockResponse = await bedrockRuntime.send(command);
-    if (!bedrockResponse.body) {
-      sendStreamError(httpStream, 'No response body received from Bedrock.');
+    const agentResponse = await bedrockAgentRuntime.send(command);
+    if (!agentResponse.completion) {
+      sendStreamError(httpStream, 'No completion stream returned by Bedrock agent.');
       return;
     }
 
-    await streamBedrockResponse(bedrockResponse.body, httpStream, modelId);
+    await streamAgentResponse(agentResponse.completion, httpStream, agentConfiguration.agentId);
   } catch (error) {
     log.error('Chat handler failed', {
       error: error instanceof Error ? { message: error.message, stack: error.stack } : error,

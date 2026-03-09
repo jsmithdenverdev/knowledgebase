@@ -34,9 +34,9 @@ const httpResponseFrom = jest.fn((_, metadata) => {
 
 const mockSend = jest.fn();
 
-jest.mock('@aws-sdk/client-bedrock-runtime', () => ({
-  BedrockRuntimeClient: jest.fn(() => ({ send: mockSend })),
-  InvokeModelWithResponseStreamCommand: jest.fn((input) => input),
+jest.mock('@aws-sdk/client-bedrock-agent-runtime', () => ({
+  BedrockAgentRuntimeClient: jest.fn(() => ({ send: mockSend })),
+  InvokeAgentCommand: jest.fn((input) => input),
 }));
 
 import { chatStreamHandler } from './chat';
@@ -86,13 +86,13 @@ describe('chatStreamHandler', () => {
     mockStreams.length = 0;
     mockSend.mockReset();
     httpResponseFrom.mockClear();
-    process.env.CHAT_MODEL_ID = 'anthropic.test-model';
-    process.env.CHAT_SYSTEM_PROMPT = 'Be helpful.';
+    process.env.AGENT_ID = 'agent-123';
+    process.env.AGENT_ALIAS_ID = 'alias-abc';
   });
 
   afterEach(() => {
-    delete process.env.CHAT_MODEL_ID;
-    delete process.env.CHAT_SYSTEM_PROMPT;
+    delete process.env.AGENT_ID;
+    delete process.env.AGENT_ALIAS_ID;
   });
 
   it('returns 400 when body is missing', async () => {
@@ -110,12 +110,10 @@ describe('chatStreamHandler', () => {
 
   it('streams OpenAI-compatible chunks and completion marker', async () => {
     mockSend.mockResolvedValue({
-      body: createAsyncIterable([
+      completion: createAsyncIterable([
         {
           chunk: {
-            bytes: encoder.encode(
-              JSON.stringify({ delta: { text: 'Hello' }, stop_reason: 'end_turn' })
-            ),
+            bytes: encoder.encode('Hello'),
           },
         },
       ]),
@@ -178,17 +176,24 @@ describe('chatStreamHandler', () => {
   });
 
   it('builds Bedrock payload with static tuning parameters', async () => {
-    mockSend.mockResolvedValue({ body: createAsyncIterable([]) });
+    mockSend.mockResolvedValue({ completion: createAsyncIterable([]) });
 
     await chatStreamHandler(validEvent(), {} as any);
 
     const commandPayload = mockSend.mock.calls[0][0];
-    expect(commandPayload.modelId).toBe('anthropic.test-model');
-    const requestBody = JSON.parse(commandPayload.body);
-    expect(requestBody.system).toBe('Be helpful.');
-    expect(requestBody.messages).toHaveLength(1);
-    expect(requestBody.max_tokens).toBe(1024);
-    expect(requestBody.temperature).toBeCloseTo(0.3);
-    expect(requestBody.top_p).toBeCloseTo(0.95);
+    expect(commandPayload.agentId).toBe('agent-123');
+    expect(commandPayload.agentAliasId).toBe('alias-abc');
+    expect(commandPayload.inputText).toContain('Say hello');
+    expect(commandPayload.sessionId).toBeDefined();
+  });
+
+  it('falls back to TSTALIASID when env alias is missing', async () => {
+    delete process.env.AGENT_ALIAS_ID;
+    mockSend.mockResolvedValue({ completion: createAsyncIterable([]) });
+
+    await chatStreamHandler(validEvent(), {} as any);
+
+    const commandPayload = mockSend.mock.calls[0][0];
+    expect(commandPayload.agentAliasId).toBe('TSTALIASID');
   });
 });
