@@ -27,6 +27,7 @@ export class KnowledgeBaseStack extends cdk.Stack {
       externalModules: ['@aws-sdk/*', 'aws-lambda'],
     };
     const defaultChatModelId = 'anthropic.claude-3-haiku-20240307-v1:0';
+    const defaultAgentPrompt = `You are an enterprise knowledge base assistant. Use the provided context to answer questions precisely, cite relevant policies when possible, and state "I don't know" if the answer is not in the knowledge base.`;
     const chatModelIdParam = new cdk.CfnParameter(this, 'ChatModelId', {
       type: 'String',
       default: '',
@@ -44,6 +45,30 @@ export class KnowledgeBaseStack extends cdk.Stack {
       )
     );
 
+    const agentSystemPromptParam = new cdk.CfnParameter(this, 'AgentSystemPrompt', {
+      type: 'String',
+      default: '',
+      description:
+        'Optional override for the Bedrock Agent instructions. Leave blank to use the default enterprise knowledge base prompt.',
+    });
+
+    const hasAgentSystemPrompt = new cdk.CfnCondition(this, 'HasAgentSystemPrompt', {
+      expression: cdk.Fn.conditionNot(
+        cdk.Fn.conditionEquals(agentSystemPromptParam.valueAsString, '')
+      ),
+    });
+
+    const resolvedAgentSystemPrompt = cdk.Token.asString(
+      cdk.Fn.conditionIf(
+        hasAgentSystemPrompt.logicalId,
+        agentSystemPromptParam.valueAsString,
+        defaultAgentPrompt
+      )
+    );
+
+    console.log(
+      `[KnowledgeBaseStack] Creating primary S3 bucket knowledge-base-docs-${this.account}-${this.region}`
+    );
     const knowledgeBaseBucket = new s3.Bucket(this, 'KnowledgeBaseBucket', {
       bucketName: `knowledge-base-docs-${this.account}-${this.region}`,
       versioned: true,
@@ -63,6 +88,8 @@ export class KnowledgeBaseStack extends cdk.Stack {
         actions: [
           'bedrock:InvokeModel',
           'bedrock:InvokeModelWithResponseStream',
+          'bedrock:InvokeAgent',
+          'bedrock:InvokeAgentWithResponseStream',
           'bedrock:Retrieve',
           'bedrock:RetrieveAndGenerate',
           'bedrock:StartIngestionJob',
@@ -75,6 +102,27 @@ export class KnowledgeBaseStack extends cdk.Stack {
 
     knowledgeBaseBucket.grantRead(lambdaRole);
     knowledgeBaseBucket.grantWrite(lambdaRole);
+
+    const agentRole = new iam.Role(this, 'AgentServiceRole', {
+      assumedBy: new iam.ServicePrincipal('bedrock.amazonaws.com'),
+      description:
+        'Execution role for the Bedrock agent to invoke models and retrieve knowledge base context.',
+    });
+
+    agentRole.addToPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'bedrock:InvokeModel',
+          'bedrock:InvokeModelWithResponseStream',
+          'bedrock:Retrieve',
+          'bedrock:RetrieveAndGenerate',
+        ],
+        resources: ['*'],
+      })
+    );
+
+    knowledgeBaseBucket.grantRead(agentRole);
 
     const vectorBucketName = cdk.Fn.join('-', [
       'knowledge-base-vectors',
@@ -133,6 +181,28 @@ export class KnowledgeBaseStack extends cdk.Stack {
       },
     });
 
+    console.log(
+      `[KnowledgeBaseStack] Configuring Bedrock agent ${this.stackName}-agent with knowledge base ${knowledgeBase.knowledgeBaseId}`
+    );
+    const chatAgent = new bedrock.CfnAgent(this, 'KnowledgeBaseAgent', {
+      agentName: `${this.stackName}-agent`,
+      agentResourceRoleArn: agentRole.roleArn,
+      autoPrepare: true,
+      foundationModel: resolvedChatModelId,
+      instruction: resolvedAgentSystemPrompt,
+      idleSessionTtlInSeconds: 900,
+      knowledgeBases: [
+        {
+          description: 'Primary knowledge base for enterprise chat',
+          knowledgeBaseId: knowledgeBase.knowledgeBaseId,
+          knowledgeBaseState: 'ENABLED',
+        },
+      ],
+      // Future enhancement: guardrails & tool definitions will be added here.
+    });
+
+    chatAgent.addDependency(dataSource);
+
     const ingestLambda = new NodejsFunction(this, 'IngestLambda', {
       role: lambdaRole,
       runtime: nodeRuntime,
@@ -154,8 +224,8 @@ export class KnowledgeBaseStack extends cdk.Stack {
       timeout: cdk.Duration.minutes(5),
       memorySize: 1024,
       environment: {
-        KNOWLEDGE_BASE_ID: knowledgeBase.knowledgeBaseId,
-        CHAT_MODEL_ID: resolvedChatModelId,
+        AGENT_ID: chatAgent.attrAgentId,
+        AGENT_ALIAS_ID: 'TSTALIASID',
       },
     });
 
@@ -193,6 +263,11 @@ export class KnowledgeBaseStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'KnowledgeBaseBucketName', {
       value: knowledgeBaseBucket.bucketName,
       description: 'S3 bucket for knowledge base documents',
+    });
+
+    new cdk.CfnOutput(this, 'ChatAgentId', {
+      value: chatAgent.attrAgentId,
+      description: 'Agent ID used for PrepareAgent and InvokeAgent calls',
     });
   }
 }

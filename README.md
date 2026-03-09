@@ -6,7 +6,7 @@ POC TypeScript Bedrock chat stack that exposes a single chat completion endpoint
 
 - **Endpoint:** `POST /chat`
 - **Protocol:** API Gateway streaming (server-sent events). `stream` must be `true` (default) and the backend always returns SSE chunks that mirror `chat.completion.chunk` objects.
-- **Model selection:** the Lambda enforces a single Bedrock model defined by `CHAT_MODEL_ID`. Any `model` field supplied by the caller is ignored.
+- **Agent orchestration:** all traffic routes through the Bedrock agent provisioned by CDK. Clients cannot select alternate models; the agent references a single Bedrock foundation model defined by the stack.
 
 ### Request Body (subset of OpenAI spec)
 
@@ -23,7 +23,7 @@ POC TypeScript Bedrock chat stack that exposes a single chat completion endpoint
 Contract constraints:
 
 - `messages` is the **only** accepted field; requests containing `model`, `temperature`, `tools`, etc. are rejected with an OpenAI-style `invalid_request_error`.
-- Each message must use the OpenAI `user` or `assistant` role (no client-provided `system` role) with plain string content; the backend injects the canonical system prompt via `CHAT_SYSTEM_PROMPT`.
+- Each message must use the OpenAI `user` or `assistant` role (no client-provided `system` role) with plain string content; the backend injects the canonical agent instructions configured via CDK.
 - The final message must be a `user` turn so the agent always responds to an explicit customer input.
 - Whitespace-only content is rejected to avoid empty turns.
 
@@ -64,6 +64,10 @@ npm run build
 npm run test
 ```
 
+### Infrastructure Parameters
+
+- `AgentSystemPrompt` (CDK parameter): optional override for the agent's instruction block. If omitted, the stack uses the repo default prompt (`You are an enterprise knowledge base assistant...`). Supply a new prompt at deploy time via `cdk deploy -c AgentSystemPrompt="Your instructions"` (quote to preserve whitespace).
+
 ### CLI Chat Utility
 
 Use the Node-based streaming helper to manually exercise the API Gateway endpoint:
@@ -76,3 +80,11 @@ CHAT_API_URL="https://example.execute-api.us-east-1.amazonaws.com/prod/chat" npm
 ```
 
 The script sends a minimal OpenAI-style request (`{ messages: [{ role: "user", content: "..." }] }`) and prints streamed chunks as they arrive, plus any OpenAI-formatted errors.
+
+## MVP Deployment Flow
+
+1. `cdk deploy` the stack. Deployment outputs now include `ChatAgentId`, which is the value you will pass to Bedrock runtime and preparedness APIs.
+2. After each deploy (or any change to prompts/knowledge-base wiring) run `aws bedrock-agent prepare-agent --agentId <ChatAgentId>` so the agent’s `DRAFT` build reflects the latest configuration. You can use the console “Prepare” button if you prefer clicks.
+3. The chat Lambda always invokes the built-in Bedrock alias `TSTALIASID`, which automatically points at the prepared draft. No manual alias or version management is required for this thin-slice MVP.
+
+Once you need stricter version gating, reintroduce an explicit `AWS::Bedrock::AgentAlias` resource and feed it a published version; the chat Lambda simply needs the alias ID updated in its environment variables.
